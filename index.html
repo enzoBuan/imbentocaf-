@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Imbento Café</title>
+  <meta name="description" content="Point-of-sale for Imbento Café: register, orders, reports and menu management.">
+  <meta name="theme-color" content="#2b2623">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><img class="logo" src="logo-white.png" alt="" width="28" height="41"><span id="shopName">Imbento Café</span></div>
+      <nav id="nav" class="tabs" aria-label="Main">
+        <button type="button" data-action="tab" data-tab="register">Register</button>
+        <button type="button" data-action="tab" data-tab="orders">Orders</button>
+        <button type="button" data-action="tab" data-tab="reports">Reports</button>
+        <button type="button" data-action="tab" data-tab="menu">Menu</button>
+        <button type="button" data-action="tab" data-tab="settings">Settings</button>
+      </nav>
+      <div class="clock" id="clock" aria-hidden="true"></div>
+    </header>
+    <main id="view"></main>
+  </div>
+  <div id="modal"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
