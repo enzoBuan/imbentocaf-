@@ -19,8 +19,13 @@
     phone: '09979839936',
     email: 'imbentocafe@gmail.com',
     address: 'Suclayin Purok 6, Arayat, Pampanga',
-    footer: 'Thank you! Brew. Create. Inspire.'
+    footer: 'Thank you! Brew. Create. Inspire.',
+    paperWidth: 32,      // printer characters per line: 32 (58 mm), 42 (76 mm), 48 (80 mm)
+    autoPrint: false,    // send receipts to a connected printer right after each sale
+    lastCashier: '',
+    lastStartCash: 0     // centavos, pre-fills the next "Open shift"
   };
+  var PRINTER_KEY = 'cafepos.printer';
 
   // Imbento Café menu. Coffee has separate Hot and Iced (16 oz) prices.
   var COFFEE = [
@@ -121,7 +126,10 @@
       settings: Object.assign({}, DEFAULT_SETTINGS),
       cart: [],
       discount: { type: 'pct', value: 0 },
-      nextNo: 1
+      nextNo: 1,
+      shifts: [],
+      currentShiftId: null,
+      nextShiftNo: 1
     };
   }
 
@@ -162,11 +170,55 @@
       tendered: Math.round(num(o.tendered, o.total)),
       change: Math.round(num(o.change, 0)),
       status: o.status === 'void' ? 'void' : 'paid',
+      shiftId: typeof o.shiftId === 'string' ? o.shiftId : '',
+      voidShiftId: typeof o.voidShiftId === 'string' ? o.voidShiftId : '',
+      voidedAt: typeof o.voidedAt === 'string' ? o.voidedAt : '',
       shop: typeof o.shop === 'string' ? o.shop : '',
       phone: typeof o.phone === 'string' ? o.phone : '',
       email: typeof o.email === 'string' ? o.email : '',
       address: typeof o.address === 'string' ? o.address : '',
       footer: typeof o.footer === 'string' ? o.footer : ''
+    };
+  }
+
+  var SUMMARY_KEYS = ['gross', 'refunds', 'discounts', 'net', 'tax', 'collected', 'orders', 'voided',
+    'cashPayments', 'cashRefunds', 'paidIn', 'paidOut', 'expected'];
+
+  function cleanSummary(s) {
+    if (!s || typeof s !== 'object') return null;
+    var out = {};
+    SUMMARY_KEYS.forEach(function (k) { out[k] = Math.round(num(s[k], 0)); });
+    out.taxInclusive = s.taxInclusive !== false;
+    var m = s.methods && typeof s.methods === 'object' ? s.methods : {};
+    out.methods = { cash: Math.round(num(m.cash, 0)), card: Math.round(num(m.card, 0)), ewallet: Math.round(num(m.ewallet, 0)) };
+    return out;
+  }
+
+  function cleanShift(s) {
+    if (!s || typeof s.id !== 'string' || typeof s.openedAt !== 'string' || isNaN(Date.parse(s.openedAt))) return null;
+    var closedAt = typeof s.closedAt === 'string' && !isNaN(Date.parse(s.closedAt)) ? s.closedAt : null;
+    var moves = Array.isArray(s.movements) ? s.movements.map(function (m) {
+      if (!m || (m.type !== 'in' && m.type !== 'out') || !isFinite(m.amount) || m.amount <= 0) return null;
+      return {
+        id: typeof m.id === 'string' ? m.id : uid('m'),
+        type: m.type,
+        amount: Math.round(m.amount),
+        note: typeof m.note === 'string' ? m.note.slice(0, 40) : '',
+        ts: typeof m.ts === 'string' ? m.ts : s.openedAt
+      };
+    }).filter(Boolean) : [];
+    return {
+      id: s.id,
+      no: Number.isInteger(s.no) && s.no > 0 ? s.no : 0,
+      openedBy: String(s.openedBy == null ? '' : s.openedBy).slice(0, 30),
+      openedAt: s.openedAt,
+      startingCash: Math.max(Math.round(num(s.startingCash, 0)), 0),
+      closedAt: closedAt,
+      closedBy: String(s.closedBy == null ? '' : s.closedBy).slice(0, 30),
+      countedCash: closedAt ? Math.round(num(s.countedCash, 0)) : null,
+      difference: closedAt ? Math.round(num(s.difference, 0)) : null,
+      movements: moves,
+      summary: closedAt ? cleanSummary(s.summary) : null
     };
   }
 
@@ -184,6 +236,10 @@
     st.phone = String(st.phone == null ? '' : st.phone).slice(0, 30);
     st.email = String(st.email == null ? '' : st.email).slice(0, 60);
     st.address = String(st.address == null ? '' : st.address).slice(0, 100);
+    st.paperWidth = [32, 42, 48].indexOf(Number(st.paperWidth)) >= 0 ? Number(st.paperWidth) : 32;
+    st.autoPrint = st.autoPrint === true;
+    st.lastCashier = String(st.lastCashier == null ? '' : st.lastCashier).slice(0, 30);
+    st.lastStartCash = Math.max(Math.round(num(st.lastStartCash, 0)), 0);
     var ids = {};
     menu.forEach(function (m) { ids[m.id] = true; });
     var cart = [];
@@ -198,10 +254,20 @@
     if (dtype === 'pct') dval = Math.min(dval, 100); else dval = Math.round(dval);
     var maxNo = orders.reduce(function (a, o) { return Math.max(a, o.no); }, 0);
     var nextNo = Number.isInteger(s.nextNo) && s.nextNo > 0 ? s.nextNo : 1;
+    var shifts = Array.isArray(s.shifts) ? s.shifts.map(cleanShift).filter(Boolean) : [];
+    var openShifts = shifts.filter(function (x) { return !x.closedAt; });
+    var curId = null;
+    openShifts.forEach(function (x) { if (x.id === s.currentShiftId) curId = x.id; });
+    if (!curId && openShifts.length) curId = openShifts[0].id;
+    var maxShift = shifts.reduce(function (a, x) { return Math.max(a, x.no); }, 0);
+    var nextShiftNo = Number.isInteger(s.nextShiftNo) && s.nextShiftNo > 0 ? s.nextShiftNo : 1;
     return {
       menu: menu, orders: orders, settings: st, cart: cart,
       discount: { type: dtype, value: dval },
-      nextNo: Math.max(nextNo, maxNo + 1)
+      nextNo: Math.max(nextNo, maxNo + 1),
+      shifts: shifts,
+      currentShiftId: curId,
+      nextShiftNo: Math.max(nextShiftNo, maxShift + 1)
     };
   }
 
@@ -313,11 +379,12 @@
       btns[i].classList.toggle('active', on);
       btns[i].setAttribute('aria-current', on ? 'page' : 'false');
     }
+    renderPills();
   }
 
   function render() {
     renderShell();
-    var views = { register: viewRegister, orders: viewOrders, reports: viewReports, menu: viewMenu, settings: viewSettings };
+    var views = { register: viewRegister, orders: viewOrders, shift: viewShift, reports: viewReports, menu: viewMenu, settings: viewSettings };
     (views[ui.tab] || viewRegister)();
   }
 
@@ -452,8 +519,9 @@
       (st.taxRate > 0 ? '<div class="row muted small"><span>' + esc(taxLabel) + '</span><span>' + fmt(t.tax) + '</span></div>' : '') +
       '<div class="row grand"><span>Total</span><span>' + fmt(t.total) + '</span></div>';
     var btn = $('#chargeBtn');
-    btn.disabled = !lines.length;
-    btn.textContent = lines.length ? 'Charge ' + fmt(t.total) : 'Charge';
+    var shiftOpen = !!currentShift();
+    btn.disabled = shiftOpen && !lines.length;
+    btn.textContent = !shiftOpen ? 'Open shift to start selling' : (lines.length ? 'Charge ' + fmt(t.total) : 'Charge');
     var count = lines.reduce(function (a, l) { return a + l.qty; }, 0);
     var bar = $('#mobileBar');
     if (bar) {
@@ -495,6 +563,7 @@
   /* ------------------------------ payment ------------------------------ */
 
   function openPayment() {
+    if (!currentShift()) { toast('Open a shift before taking payment'); openShiftModal(); return; }
     var lines = cartLines();
     if (!lines.length) { toast('Add an item first'); return; }
     var t = calc(lines, state.discount, state.settings);
@@ -538,6 +607,8 @@
     var t = pay.totals;
     var isCash = pay.method === 'cash';
     if (isCash && pay.tendered < t.total) return;
+    var sh = currentShift();
+    if (!sh) { closeModal(); toast('No open shift. Open a shift first.'); openShiftModal(); return; }
     var st = state.settings;
     var order = {
       id: uid('o'),
@@ -555,6 +626,9 @@
       tendered: isCash ? pay.tendered : t.total,
       change: isCash ? pay.tendered - t.total : 0,
       status: 'paid',
+      shiftId: sh.id,
+      voidShiftId: '',
+      voidedAt: '',
       shop: st.shopName,
       phone: st.phone,
       email: st.email,
@@ -573,6 +647,9 @@
     }
     showReceipt(order.id, true);
     if (ok) toast('Sale completed');
+    if (st.autoPrint && printerReady()) {
+      rawPrint(receiptBytes(order)).catch(function (e) { toast('Auto-print failed: ' + errText(e)); });
+    }
   }
 
   /* ------------------------------ receipt ------------------------------ */
@@ -613,7 +690,7 @@
       receiptHTML(o) +
       '<div class="actions no-print">' +
         (o.status === 'paid' && !justPaid ? '<button type="button" class="btn danger" data-action="void-order" data-id="' + esc(o.id) + '">Void order</button>' : '') +
-        '<button type="button" class="btn" data-action="print">Print</button>' +
+        '<button type="button" class="btn" data-action="print-order" data-id="' + esc(o.id) + '">Print</button>' +
         '<button type="button" class="btn primary" data-action="close-modal">' + (justPaid ? 'New order' : 'Close') + '</button>' +
       '</div>'
     );
@@ -622,8 +699,12 @@
   function voidOrder(id) {
     var o = state.orders.filter(function (x) { return x.id === id; })[0];
     if (!o || o.status === 'void') return;
+    var cur = currentShift();
+    if (o.shiftId && !cur) { toast('Open a shift first to void an order from a closed shift'); return; }
     if (!window.confirm('Void order ' + orderNo(o.no) + ' (' + fmt(o.total) + ')? It will be excluded from reports.')) return;
     o.status = 'void';
+    o.voidedAt = new Date().toISOString();
+    o.voidShiftId = cur ? cur.id : '';
     save();
     closeModal();
     if (ui.tab === 'orders') renderOrdersList();
@@ -852,6 +933,11 @@
           '<p class="hint">Tax changes apply to new orders only. Past receipts keep the rate they were made with.</p>' +
         '</form>' +
         '<div class="card stack">' +
+          '<h2>Printer</h2>' +
+          '<p class="muted small">Connect a USB, Bluetooth or serial receipt printer. Without one, Print uses the system print dialog.</p>' +
+          '<div class="actions start"><button type="button" class="btn" data-action="printer">Printer setup</button></div>' +
+        '</div>' +
+        '<div class="card stack">' +
           '<h2>Data</h2>' +
           '<p class="muted small">Everything is stored in this browser on this device. Export a backup regularly, and use it to move data to another device.</p>' +
           '<div class="actions start">' +
@@ -886,6 +972,620 @@
     reader.readAsText(file);
   }
 
+  /* ------------------------------ shifts ------------------------------ */
+
+  function shiftById(id) {
+    for (var i = 0; i < state.shifts.length; i++) if (state.shifts[i].id === id) return state.shifts[i];
+    return null;
+  }
+
+  function currentShift() {
+    var s = state.currentShiftId ? shiftById(state.currentShiftId) : null;
+    return s && !s.closedAt ? s : null;
+  }
+
+  // Live numbers for a shift. Closed shifts use the snapshot taken when they were closed.
+  function shiftSummary(sh) {
+    var r = {
+      gross: 0, refunds: 0, discounts: 0, net: 0, tax: 0, collected: 0, orders: 0, voided: 0,
+      cashPayments: 0, cashRefunds: 0, paidIn: 0, paidOut: 0, expected: 0,
+      taxInclusive: state.settings.taxInclusive,
+      methods: { cash: 0, card: 0, ewallet: 0 }
+    };
+    state.orders.forEach(function (o) {
+      if (o.shiftId === sh.id) {
+        if (o.status === 'paid') {
+          r.gross += o.subtotal; r.discounts += o.discount; r.tax += o.tax; r.orders++;
+          r.methods[o.method] += o.total;
+          if (o.method === 'cash') r.cashPayments += o.total;
+        } else if (o.voidShiftId === sh.id) {
+          r.voided++; // sold and voided inside this shift: never counted
+        }
+      }
+      if (o.status === 'void' && o.voidShiftId === sh.id && o.shiftId !== sh.id) {
+        // an order from an earlier shift voided now: money goes back out of this shift
+        r.refunds += o.subtotal; r.discounts -= o.discount; r.tax -= o.tax;
+        r.methods[o.method] -= o.total;
+        if (o.method === 'cash') r.cashRefunds += o.total;
+      }
+    });
+    sh.movements.forEach(function (m) { if (m.type === 'in') r.paidIn += m.amount; else r.paidOut += m.amount; });
+    r.net = r.gross - r.refunds - r.discounts;
+    r.collected = r.methods.cash + r.methods.card + r.methods.ewallet;
+    r.expected = sh.startingCash + r.cashPayments - r.cashRefunds + r.paidIn - r.paidOut;
+    return r;
+  }
+
+  function shiftData(sh) { return sh.closedAt && sh.summary ? sh.summary : shiftSummary(sh); }
+
+  // Rows shared by the screen, the on-screen report and the thermal printout.
+  function shiftRows(sh) {
+    var d = shiftData(sh);
+    var cash = [
+      ['Starting cash', fmt(sh.startingCash)],
+      ['Cash payments', fmt(d.cashPayments)],
+      ['Cash refunds', fmt(d.cashRefunds)],
+      ['Paid in', fmt(d.paidIn)],
+      ['Paid out', fmt(d.paidOut)],
+      ['Expected cash amount', fmt(d.expected), true]
+    ];
+    if (sh.closedAt) {
+      var diff = sh.difference || 0;
+      cash.push(['Counted cash', fmt(sh.countedCash || 0)]);
+      cash.push([diff === 0 ? 'Difference' : (diff > 0 ? 'Over' : 'Short'), fmt(Math.abs(diff)), true]);
+    }
+    var sales = [
+      ['Gross sales', fmt(d.gross)],
+      ['Refunds', fmt(d.refunds)],
+      ['Discounts', fmt(d.discounts)],
+      ['Net sales', fmt(d.net), true],
+      ['Cash', fmt(d.methods.cash)],
+      ['Card', fmt(d.methods.card)],
+      ['E-wallet', fmt(d.methods.ewallet)],
+      ['Taxes ' + (d.taxInclusive ? '(included)' : '(added)'), fmt(d.tax)],
+      ['Orders', String(d.orders)]
+    ];
+    if (d.voided) sales.push(['Voided orders', String(d.voided)]);
+    var moves = sh.movements.map(function (m) {
+      return [(m.type === 'in' ? 'Paid in' : 'Paid out') + (m.note ? ': ' + m.note : ''), fmt(m.amount)];
+    });
+    return { cash: cash, sales: sales, moves: moves };
+  }
+
+  function kvHTML(list) {
+    return list.map(function (r) {
+      return '<div class="kv' + (r[2] ? ' strong' : '') + '"><span>' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
+    }).join('');
+  }
+
+  function viewShift() {
+    var sh = currentShift();
+    var past = state.shifts.filter(function (s) { return s.closedAt; })
+      .sort(function (a, b) { return Date.parse(b.closedAt) - Date.parse(a.closedAt); });
+    var body;
+    if (sh) {
+      var rows = shiftRows(sh);
+      body =
+        '<div class="card stack">' +
+          '<div class="shift-head">' +
+            '<div><h2>Shift #' + sh.no + ' <span class="badge open">Open</span></h2>' +
+            '<div class="muted small">Opened by ' + esc(sh.openedBy) + ' · ' + esc(fmtDateTime(sh.openedAt)) + '</div></div>' +
+            '<div class="actions">' +
+              '<button type="button" class="btn" data-action="cash-mgmt">Cash management</button>' +
+              '<button type="button" class="btn" data-action="print-shift" data-id="' + esc(sh.id) + '">Print report</button>' +
+              '<button type="button" class="btn danger" data-action="close-shift">Close shift</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="two">' +
+          '<div class="card"><h3 class="sec">Cash drawer</h3>' + kvHTML(rows.cash) +
+            (rows.moves.length ? '<h3 class="sec sp">Cash movements</h3>' + kvHTML(rows.moves) : '') + '</div>' +
+          '<div class="card"><h3 class="sec">Sales summary</h3>' + kvHTML(rows.sales) + '</div>' +
+        '</div>';
+    } else {
+      body =
+        '<div class="card stack center">' +
+          '<h2>No shift is open</h2>' +
+          '<p class="muted">Count the cash in the drawer and open a shift to start taking orders.</p>' +
+          '<div><button type="button" class="btn primary big" data-action="open-shift">Open shift</button></div>' +
+        '</div>';
+    }
+    $('#view').innerHTML =
+      '<section class="page">' +
+        '<div class="page-head"><h1>Shift</h1></div>' + body +
+        '<div class="card"><h2>Past shifts</h2>' +
+          (past.length ?
+            '<div class="table-wrap"><table><thead><tr><th>Shift</th><th>Cashier</th><th>Opened</th><th>Closed</th><th class="num">Starting</th><th class="num">Counted</th><th class="num">Diff.</th></tr></thead><tbody>' +
+            past.slice(0, 60).map(function (s) {
+              var diff = s.difference || 0;
+              return '<tr class="clickable" tabindex="0" data-action="view-shift" data-id="' + esc(s.id) + '">' +
+                '<td><strong>#' + s.no + '</strong></td><td>' + esc(s.openedBy) + '</td>' +
+                '<td>' + esc(fmtDateTime(s.openedAt)) + '</td><td>' + esc(fmtDateTime(s.closedAt)) + '</td>' +
+                '<td class="num">' + fmt(s.startingCash) + '</td><td class="num">' + fmt(s.countedCash || 0) + '</td>' +
+                '<td class="num ' + (diff === 0 ? 'pos' : 'neg') + '">' + (diff === 0 ? 'OK' : (diff > 0 ? '+' : '-') + fmt(Math.abs(diff))) + '</td></tr>';
+            }).join('') + '</tbody></table></div>' :
+            '<div class="empty">Closed shifts will appear here.</div>') +
+        '</div>' +
+      '</section>';
+  }
+
+  function openShiftModal() {
+    if (currentShift()) { setTab('shift'); return; }
+    var s = state.settings;
+    openModal(
+      '<h2>Open shift</h2>' +
+      '<form class="stack" data-form="shift-open" autocomplete="off">' +
+        '<label class="field">Cashier name<input type="text" name="cashier" maxlength="30" required value="' + esc(s.lastCashier) + '"></label>' +
+        '<label class="field">Starting cash in drawer<input type="number" name="startCash" min="0" step="0.01" inputmode="decimal" required value="' + (s.lastStartCash / 100).toFixed(2) + '"></label>' +
+        '<p class="hint">Count the cash in the drawer first. This becomes shift #' + state.nextShiftNo + '.</p>' +
+        '<div class="actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" class="btn primary">Open shift</button></div>' +
+      '</form>'
+    );
+  }
+
+  function openCashMgmt() {
+    var sh = currentShift();
+    if (!sh) return;
+    var d = shiftSummary(sh);
+    var recent = sh.movements.slice(-4).reverse();
+    openModal(
+      '<h2>Cash management</h2>' +
+      '<div class="due"><span>Expected in drawer</span><strong>' + fmt(d.expected) + '</strong></div>' +
+      '<form class="stack" data-form="shift-cash" autocomplete="off">' +
+        '<label class="field">Type<select name="type"><option value="in">Paid in (add cash)</option><option value="out">Paid out (take cash)</option></select></label>' +
+        '<label class="field">Amount<input type="number" name="amount" min="0.01" step="0.01" inputmode="decimal" required placeholder="0.00"></label>' +
+        '<label class="field">Note (optional)<input type="text" name="note" maxlength="40" placeholder="e.g. Ice delivery"></label>' +
+        (recent.length ? '<div class="small muted">Recent</div>' + kvHTML(recent.map(function (m) {
+          return [(m.type === 'in' ? 'Paid in' : 'Paid out') + (m.note ? ': ' + m.note : '') + ' · ' + fmtTime(m.ts), fmt(m.amount)];
+        })) : '') +
+        '<div class="actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" class="btn primary">Save</button></div>' +
+      '</form>'
+    );
+  }
+
+  function openCloseShift() {
+    var sh = currentShift();
+    if (!sh) return;
+    var d = shiftSummary(sh);
+    openModal(
+      '<h2>Close shift #' + sh.no + '</h2>' +
+      '<div class="due"><span>Expected cash</span><strong>' + fmt(d.expected) + '</strong></div>' +
+      '<form class="stack" data-form="shift-close" autocomplete="off">' +
+        '<label class="field">Counted cash in drawer<input id="countedCash" type="number" name="counted" min="0" step="0.01" inputmode="decimal" required placeholder="0.00" data-input="count-cash"></label>' +
+        '<div class="quick"><button type="button" class="btn sm" data-action="count-exact">Matches expected</button></div>' +
+        '<div class="change"><span id="diffLabel">Difference</span><span id="diffOut">—</span></div>' +
+        '<p class="hint">Closing saves this shift\'s report. Open a new shift to keep selling.</p>' +
+        '<div class="actions"><button type="button" class="btn" data-action="close-modal">Cancel</button><button type="submit" class="btn danger">Close shift</button></div>' +
+      '</form>'
+    );
+  }
+
+  function shiftReportHTML(sh) {
+    var s = state.settings, rows = shiftRows(sh);
+    function block(title, list) {
+      return '<hr><div class="strong">' + esc(title) + '</div>' + list.map(function (r) {
+        return '<div class="r' + (r[2] ? ' strong' : '') + '"><span>' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
+      }).join('');
+    }
+    return '<div class="receipt">' +
+      '<div class="r-head"><img class="r-logo" src="logo-black.png" alt="' + esc(s.shopName) + ' logo">' +
+        (s.address ? '<div>' + esc(s.address) + '</div>' : '') + '</div>' +
+      '<hr><div class="center strong">SHIFT REPORT</div>' +
+      '<div class="r"><span>Shift</span><span>#' + sh.no + '</span></div>' +
+      '<div class="r"><span>Cashier</span><span>' + esc(sh.openedBy) + '</span></div>' +
+      '<div class="r"><span>Opened</span><span>' + esc(fmtDateTime(sh.openedAt)) + '</span></div>' +
+      (sh.closedAt ? '<div class="r"><span>Closed</span><span>' + esc(fmtDateTime(sh.closedAt)) + '</span></div>'
+                   : '<div class="r"><span>Status</span><span>Still open</span></div>') +
+      block('Cash drawer', rows.cash) +
+      block('Sales summary', rows.sales) +
+      (rows.moves.length ? block('Cash movements', rows.moves) : '') +
+    '</div>';
+  }
+
+  function showShiftReport(id, justClosed) {
+    var sh = shiftById(id);
+    if (!sh) return;
+    openModal(
+      shiftReportHTML(sh) +
+      '<div class="actions no-print">' +
+        '<button type="button" class="btn" data-action="print-shift" data-id="' + esc(sh.id) + '">Print</button>' +
+        '<button type="button" class="btn primary" data-action="close-modal">' + (justClosed ? 'Done' : 'Close') + '</button>' +
+      '</div>'
+    );
+  }
+
+  /* ------------------------------ printer ------------------------------ */
+
+  // One active printer connection. The browser cannot list the system's printers,
+  // so "ready" means: a USB / Bluetooth LE / serial printer is connected and its channel is open.
+  var printer = { kind: null, status: 'none', name: '', msg: '', busy: false, dev: null, iface: 0, ep: 0, chr: null, port: null, writer: null };
+
+  var BT_SERVICES = [
+    '000018f0-0000-1000-8000-00805f9b34fb', '0000ff00-0000-1000-8000-00805f9b34fb',
+    '0000ffe0-0000-1000-8000-00805f9b34fb', '0000fff0-0000-1000-8000-00805f9b34fb',
+    '0000ae30-0000-1000-8000-00805f9b34fb', 'e7810a71-73ae-499d-8c15-faa9aef0c3f2',
+    '49535343-fe7d-4ae5-8fa9-9fafd205e455'
+  ];
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function printerSupport() {
+    return { usb: !!navigator.usb, bluetooth: !!navigator.bluetooth, serial: !!navigator.serial };
+  }
+
+  function errText(e) {
+    var m = e && e.message ? String(e.message) : String(e || 'Unknown error');
+    return m.length > 120 ? m.slice(0, 117) + '…' : m;
+  }
+
+  function setPrinter(patch) {
+    Object.assign(printer, patch);
+    renderPills();
+    renderPrinterBody();
+  }
+
+  function printerAlive() {
+    try {
+      if (printer.kind === 'usb') return !!(printer.dev && printer.dev.opened);
+      if (printer.kind === 'bluetooth') return !!(printer.dev && printer.dev.gatt && printer.dev.gatt.connected && printer.chr);
+      if (printer.kind === 'serial') return !!(printer.port && printer.writer && printer.port.writable);
+    } catch (e) { /* treat as not alive */ }
+    return false;
+  }
+
+  function printerReady() { return printer.status === 'ready' && printerAlive(); }
+
+  function checkPrinter() {
+    if (printer.status === 'ready' && !printerAlive()) setPrinter({ status: 'none', msg: 'The printer was disconnected.' });
+  }
+
+  function rememberPrinter(info) {
+    try { localStorage.setItem(PRINTER_KEY, JSON.stringify(info)); } catch (e) { /* ignore */ }
+  }
+
+  function forgetPrinter() {
+    try { localStorage.removeItem(PRINTER_KEY); } catch (e) { /* ignore */ }
+  }
+
+  function failOpen(e, quiet) {
+    setPrinter(quiet ? { status: 'none', msg: '' } : { status: 'error', msg: errText(e) });
+  }
+
+  function pickerFailed(e) {
+    if (e && e.name === 'NotFoundError') setPrinter({ status: printerAlive() ? 'ready' : 'none', msg: '' }); // picker dismissed
+    else setPrinter({ status: 'error', msg: errText(e) });
+  }
+
+  async function usbOpen(dev, quiet) {
+    setPrinter({ status: 'connecting', msg: '' });
+    try {
+      await dev.open();
+      if (dev.configuration === null) await dev.selectConfiguration(1);
+      var pick = null;
+      dev.configuration.interfaces.forEach(function (i) {
+        i.alternates.forEach(function (a) {
+          a.endpoints.forEach(function (e) {
+            if (e.direction === 'out' && e.type === 'bulk') {
+              var score = a.interfaceClass === 7 ? 2 : 1; // 7 = printer class
+              if (!pick || score > pick.score) pick = { iface: i.interfaceNumber, alt: a.alternateSetting, ep: e.endpointNumber, score: score };
+            }
+          });
+        });
+      });
+      if (!pick) throw new Error('This USB device has no printable endpoint.');
+      await dev.claimInterface(pick.iface);
+      if (pick.alt) await dev.selectAlternateInterface(pick.iface, pick.alt);
+      setPrinter({ kind: 'usb', dev: dev, iface: pick.iface, ep: pick.ep, chr: null, port: null, writer: null, name: dev.productName || 'USB printer', status: 'ready', msg: '' });
+      rememberPrinter({ kind: 'usb', vid: dev.vendorId, pid: dev.productId });
+    } catch (e) {
+      try { await dev.close(); } catch (_) { /* ignore */ }
+      failOpen(e, quiet);
+    }
+  }
+
+  function onBtDisc() { checkPrinter(); }
+
+  async function btOpen(dev, quiet) {
+    setPrinter({ status: 'connecting', msg: '' });
+    try {
+      var server = await dev.gatt.connect();
+      var services = await server.getPrimaryServices();
+      var chr = null;
+      for (var i = 0; i < services.length && !chr; i++) {
+        var chars = await services[i].getCharacteristics();
+        for (var j = 0; j < chars.length; j++) {
+          if (chars[j].properties.write || chars[j].properties.writeWithoutResponse) { chr = chars[j]; break; }
+        }
+      }
+      if (!chr) throw new Error('No printer service found. Printers that only support classic Bluetooth cannot be used from a browser.');
+      dev.removeEventListener('gattserverdisconnected', onBtDisc);
+      dev.addEventListener('gattserverdisconnected', onBtDisc);
+      setPrinter({ kind: 'bluetooth', dev: dev, chr: chr, port: null, writer: null, name: dev.name || 'Bluetooth printer', status: 'ready', msg: '' });
+      rememberPrinter({ kind: 'bluetooth', id: dev.id });
+    } catch (e) {
+      try { if (dev.gatt && dev.gatt.connected) dev.gatt.disconnect(); } catch (_) { /* ignore */ }
+      failOpen(e, quiet);
+    }
+  }
+
+  async function serialOpen(port, quiet) {
+    setPrinter({ status: 'connecting', msg: '' });
+    try {
+      await port.open({ baudRate: 9600 });
+      var writer = port.writable.getWriter();
+      setPrinter({ kind: 'serial', port: port, writer: writer, dev: null, chr: null, name: 'Serial printer', status: 'ready', msg: '' });
+      var info = port.getInfo ? port.getInfo() : {};
+      rememberPrinter({ kind: 'serial', vid: info.usbVendorId || 0, pid: info.usbProductId || 0 });
+    } catch (e) {
+      try { await port.close(); } catch (_) { /* ignore */ }
+      failOpen(e, quiet);
+    }
+  }
+
+  async function connectPrinter(kind) {
+    var cap = printerSupport();
+    if (!cap[kind]) { toast('This browser does not support ' + kind + ' printers'); return; }
+    var target;
+    try {
+      if (kind === 'usb') target = await navigator.usb.requestDevice({ filters: [{ classCode: 7 }, { classCode: 255 }] });
+      else if (kind === 'bluetooth') target = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: BT_SERVICES });
+      else target = await navigator.serial.requestPort();
+    } catch (e) { pickerFailed(e); return; }
+    await disconnectPrinter(true);
+    if (kind === 'usb') await usbOpen(target);
+    else if (kind === 'bluetooth') await btOpen(target);
+    else await serialOpen(target);
+    if (printerReady()) toast('Printer ready: ' + printer.name);
+  }
+
+  async function disconnectPrinter(keepSaved) {
+    var p = printer;
+    try {
+      if (p.kind === 'usb' && p.dev) {
+        try { await p.dev.releaseInterface(p.iface); } catch (e) { /* ignore */ }
+        await p.dev.close();
+      } else if (p.kind === 'bluetooth' && p.dev && p.dev.gatt && p.dev.gatt.connected) {
+        p.dev.gatt.disconnect();
+      } else if (p.kind === 'serial' && p.port) {
+        try { if (p.writer) p.writer.releaseLock(); } catch (e) { /* ignore */ }
+        await p.port.close();
+      }
+    } catch (e) { /* already gone */ }
+    if (keepSaved !== true) forgetPrinter();
+    setPrinter({ kind: null, dev: null, chr: null, port: null, writer: null, name: '', status: 'none', msg: '' });
+  }
+
+  async function autoReconnect() {
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(PRINTER_KEY) || 'null'); } catch (e) { /* ignore */ }
+    if (!saved || printerReady() || printer.status === 'connecting') return;
+    try {
+      var found;
+      if (saved.kind === 'usb' && navigator.usb) {
+        found = (await navigator.usb.getDevices()).filter(function (d) { return d.vendorId === saved.vid && d.productId === saved.pid; })[0];
+        if (found) await usbOpen(found, true);
+      } else if (saved.kind === 'serial' && navigator.serial) {
+        found = (await navigator.serial.getPorts()).filter(function (p) {
+          var i = p.getInfo ? p.getInfo() : {};
+          return (i.usbVendorId || 0) === saved.vid && (i.usbProductId || 0) === saved.pid;
+        })[0];
+        if (found) await serialOpen(found, true);
+      } else if (saved.kind === 'bluetooth' && navigator.bluetooth && navigator.bluetooth.getDevices) {
+        found = (await navigator.bluetooth.getDevices()).filter(function (d) { return d.id === saved.id; })[0];
+        if (found) await btOpen(found, true);
+      }
+    } catch (e) { /* stay disconnected */ }
+  }
+
+  function watchPrinterEvents() {
+    try {
+      if (navigator.usb) {
+        navigator.usb.addEventListener('disconnect', function () { checkPrinter(); });
+        navigator.usb.addEventListener('connect', function () { autoReconnect(); });
+      }
+      if (navigator.serial) {
+        navigator.serial.addEventListener('disconnect', function () { checkPrinter(); });
+        navigator.serial.addEventListener('connect', function () { autoReconnect(); });
+      }
+    } catch (e) { /* events unsupported */ }
+  }
+
+  async function rawPrint(bytes) {
+    if (!printerReady()) throw new Error('Printer is not ready');
+    if (printer.busy) throw new Error('Printer is busy');
+    printer.busy = true;
+    try {
+      var i;
+      if (printer.kind === 'usb') {
+        for (i = 0; i < bytes.length; i += 4096) {
+          var res = await printer.dev.transferOut(printer.ep, bytes.slice(i, i + 4096));
+          if (res.status !== 'ok') throw new Error('USB transfer ' + res.status);
+        }
+      } else if (printer.kind === 'bluetooth') {
+        var chr = printer.chr;
+        for (i = 0; i < bytes.length; i += 100) {
+          var chunk = bytes.slice(i, i + 100);
+          if (chr.properties.writeWithoutResponse && chr.writeValueWithoutResponse) await chr.writeValueWithoutResponse(chunk);
+          else await chr.writeValue(chunk);
+          await sleep(12);
+        }
+      } else if (printer.kind === 'serial') {
+        await printer.writer.write(bytes);
+      }
+    } catch (e) {
+      printer.busy = false;
+      setPrinter({ status: 'error', msg: errText(e) });
+      throw e;
+    }
+    printer.busy = false;
+  }
+
+  // Print on the connected thermal printer; otherwise fall back to the system print dialog.
+  function doPrint(build, rawOnly) {
+    if (!printerReady()) {
+      if (rawOnly) { toast('No printer connected'); return; }
+      window.print();
+      return;
+    }
+    rawPrint(build()).then(function () { toast('Sent to printer'); })
+      .catch(function (e) { toast('Print failed: ' + errText(e) + '. Tap Print again to use the system print dialog.'); });
+  }
+
+  /* ESC/POS builder: plain text, no images, so it works on any thermal printer. */
+  function toAscii(s) {
+    return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/₱/g, 'P').replace(/[^\x20-\x7e]/g, '?');
+  }
+
+  // word-wrap to `max` characters per line (hard-breaks words longer than a line)
+  function wrap(s, max) {
+    var out = [];
+    s = toAscii(s);
+    while (s.length > max) {
+      var cut = s.lastIndexOf(' ', max);
+      if (cut <= 0) cut = max;
+      out.push(s.slice(0, cut));
+      s = s.slice(cut).replace(/^ +/, '');
+    }
+    out.push(s);
+    return out;
+  }
+
+  function escpos() {
+    var w = state.settings.paperWidth, b = [], dbl = false;
+    function text(s) { s = toAscii(s); for (var i = 0; i < s.length; i++) b.push(s.charCodeAt(i)); }
+    var api = {
+      init: function () { b.push(0x1b, 0x40); return api; },
+      align: function (n) { b.push(0x1b, 0x61, n); return api; },        // 0 left, 1 center
+      bold: function (on) { b.push(0x1b, 0x45, on ? 1 : 0); return api; },
+      size: function (on) { dbl = !!on; b.push(0x1d, 0x21, on ? 0x11 : 0); return api; },
+      line: function (s) {
+        var max = dbl ? Math.floor(w / 2) : w;
+        wrap(s, max).forEach(function (ln) { text(ln); b.push(10); });
+        return api;
+      },
+      row: function (l, r) {
+        r = toAscii(r);
+        var space = w - r.length - 1;
+        if (space < 6) { api.line(l); return api.line(r); }
+        var parts = wrap(l, space);
+        var last = parts.pop();
+        parts.forEach(function (ln) { text(ln); b.push(10); });
+        text(last + new Array(w - last.length - r.length + 1).join(' ') + r);
+        b.push(10);
+        return api;
+      },
+      rule: function () { text(new Array(w + 1).join('-')); b.push(10); return api; },
+      feed: function (n) { b.push(0x1b, 0x64, n); return api; },
+      cut: function () { b.push(0x1d, 0x56, 0x42, 0x03); return api; },
+      bytes: function () { return new Uint8Array(b); }
+    };
+    return api;
+  }
+
+  function receiptBytes(o) {
+    var p = escpos();
+    p.init().align(1).bold(true).size(true).line(o.shop || state.settings.shopName).size(false).bold(false);
+    if (o.address) p.line(o.address);
+    if (o.phone) p.line('Tel: ' + o.phone);
+    if (o.email) p.line(o.email);
+    p.align(0).rule().align(1).line('Order ' + orderNo(o.no)).line(fmtDateTime(o.ts));
+    if (o.status === 'void') p.bold(true).line('*** VOID ***').bold(false);
+    p.align(0).rule();
+    o.lines.forEach(function (l) { p.row(l.qty + ' x ' + l.name, fmt(l.price * l.qty)); });
+    p.rule().row('Subtotal', fmt(o.subtotal));
+    if (o.discount > 0) p.row(o.discLabel, '-' + fmt(o.discount));
+    if (o.taxRate > 0) p.row('Tax ' + o.taxRate + '%' + (o.taxInclusive ? ' (incl.)' : ''), fmt(o.tax));
+    p.bold(true).row('TOTAL', fmt(o.total)).bold(false);
+    p.row('Paid by', METHODS[o.method]);
+    if (o.method === 'cash') { p.row('Cash', fmt(o.tendered)); p.row('Change', fmt(o.change)); }
+    if (o.footer) p.rule().align(1).line(o.footer).align(0);
+    return p.feed(4).cut().bytes();
+  }
+
+  function shiftReportBytes(sh) {
+    var s = state.settings, rows = shiftRows(sh), p = escpos();
+    p.init().align(1).bold(true).size(true).line(s.shopName).size(false).bold(false);
+    if (s.address) p.line(s.address);
+    p.align(1).rule().bold(true).line('SHIFT REPORT').bold(false).align(0);
+    p.row('Shift', '#' + sh.no).row('Cashier', sh.openedBy).row('Opened', fmtDateTime(sh.openedAt));
+    if (sh.closedAt) p.row('Closed', fmtDateTime(sh.closedAt)); else p.row('Status', 'Still open');
+    var blocks = [['Cash drawer', rows.cash], ['Sales summary', rows.sales]];
+    if (rows.moves.length) blocks.push(['Cash movements', rows.moves]);
+    blocks.forEach(function (bl) {
+      p.rule().bold(true).line(bl[0]).bold(false);
+      bl[1].forEach(function (r) { if (r[2]) p.bold(true); p.row(r[0], r[1]); p.bold(false); });
+    });
+    return p.feed(4).cut().bytes();
+  }
+
+  function testBytes() {
+    var s = state.settings, p = escpos();
+    p.init().align(1).bold(true).size(true).line(s.shopName).size(false).bold(false)
+      .line('PRINTER TEST').align(0).rule()
+      .row('Paper width', s.paperWidth + ' chars').row('Printer', printer.name || '-').row('Time', fmtDateTime(new Date()))
+      .rule().align(1).line('If you can read this,').line('the printer is ready.').align(0);
+    return p.feed(4).cut().bytes();
+  }
+
+  /* printer UI */
+
+  function renderPills() {
+    var sp = $('#shiftPill'), pp = $('#printerPill');
+    if (sp) {
+      var sh = currentShift();
+      sp.innerHTML = '<i class="dot ' + (sh ? 'ok' : 'warn') + '"></i><span>' + (sh ? 'Shift #' + sh.no : 'No shift') + '</span>';
+      sp.title = sh ? 'Shift #' + sh.no + ' open (' + sh.openedBy + ')' : 'No open shift';
+    }
+    if (pp) {
+      var cls = { ready: 'ok', connecting: 'warn', error: 'bad' }[printer.status] || '';
+      var label = { ready: 'Printer ready', connecting: 'Connecting…', error: 'Printer error' }[printer.status] || 'No printer';
+      pp.innerHTML = '<i class="dot ' + cls + '"></i><span>' + label + '</span>';
+      pp.title = printer.status === 'ready' ? printer.name : (printer.msg || 'Tap to set up a printer');
+    }
+  }
+
+  function openPrinterModal() {
+    var s = state.settings;
+    openModal(
+      '<h2>Printer</h2>' +
+      '<div id="printerBody" class="stack"></div>' +
+      '<label class="field">Paper width<select data-input="paper-width">' +
+        [[32, '58 mm (32 characters)'], [42, '76 mm (42 characters)'], [48, '80 mm (48 characters)']].map(function (o) {
+          return '<option value="' + o[0] + '"' + (s.paperWidth === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+        }).join('') + '</select></label>' +
+      '<label class="check"><input type="checkbox" data-input="auto-print"' + (s.autoPrint ? ' checked' : '') + '> Print receipt automatically after each sale</label>' +
+      '<div class="actions"><button type="button" class="btn primary" data-action="close-modal">Done</button></div>'
+    );
+    renderPrinterBody();
+    checkPrinter();
+  }
+
+  function renderPrinterBody() {
+    var box = $('#printerBody');
+    if (!box) return;
+    var cap = printerSupport();
+    var ready = printerReady();
+    var cls = ready ? 'ok' : { connecting: 'warn', error: 'bad' }[printer.status] || '';
+    var title, sub;
+    if (ready) { title = 'Ready to print'; sub = esc(printer.name) + ' · ' + { usb: 'USB', bluetooth: 'Bluetooth', serial: 'Serial' }[printer.kind]; }
+    else if (printer.status === 'connecting') { title = 'Connecting…'; sub = 'Keep the printer on and nearby.'; }
+    else if (printer.status === 'error') { title = 'Printer error'; sub = esc(printer.msg || 'Could not talk to the printer.'); }
+    else { title = 'No printer connected'; sub = esc(printer.msg || 'Print will use the system print dialog.'); }
+    var btns = [];
+    if (cap.usb) btns.push('<button type="button" class="btn" data-action="printer-connect" data-kind="usb">USB printer</button>');
+    if (cap.bluetooth) btns.push('<button type="button" class="btn" data-action="printer-connect" data-kind="bluetooth">Bluetooth printer</button>');
+    if (cap.serial) btns.push('<button type="button" class="btn" data-action="printer-connect" data-kind="serial">Serial / COM port</button>');
+    box.innerHTML =
+      '<div class="pbox"><i class="dot ' + cls + '"></i><div><strong>' + title + '</strong><div class="muted small">' + sub + '</div></div></div>' +
+      (ready ? '<div class="actions start"><button type="button" class="btn primary" data-action="printer-test">Test print</button>' +
+               '<button type="button" class="btn" data-action="printer-disconnect">Disconnect</button></div>' : '') +
+      (btns.length ?
+        '<div class="small muted"><strong>' + (ready ? 'Switch printer' : 'Connect a printer') + '</strong></div><div class="actions start">' + btns.join('') + '</div>' :
+        '<p class="hint">This browser cannot connect to printers directly. Use Chrome or Edge (Android or desktop). The Print button will open the system print dialog instead.</p>') +
+      '<p class="hint">"Ready" means the connection is open. Printers rarely report paper or cover status to a web page, so run a test print to be sure. ' +
+      'Printers that only support classic Bluetooth cannot be reached from a browser: pair them with the device and use the Print button (system print dialog).</p>';
+  }
+
   /* ------------------------------ events ------------------------------ */
 
   var actions = {
@@ -916,7 +1616,32 @@
     'pay-confirm': function () { completeSale(); },
     'close-modal': function () { closeModal(); },
     'modal-backdrop': function () { closeModal(); },
-    'print': function () { window.print(); },
+    'print-order': function (el) {
+      var o = state.orders.filter(function (x) { return x.id === el.dataset.id; })[0];
+      if (o) doPrint(function () { return receiptBytes(o); });
+    },
+    'print-shift': function (el) {
+      var sh = shiftById(el.dataset.id);
+      if (!sh) return;
+      var fromPage = !modalOpen();
+      if (printerReady()) { doPrint(function () { return shiftReportBytes(sh); }); return; }
+      if (fromPage) showShiftReport(sh.id, false);
+      window.print();
+    },
+    'open-shift': function () { openShiftModal(); },
+    'close-shift': function () { openCloseShift(); },
+    'cash-mgmt': function () { openCashMgmt(); },
+    'view-shift': function (el) { showShiftReport(el.dataset.id, false); },
+    'count-exact': function () {
+      var sh = currentShift();
+      if (!sh) return;
+      $('#countedCash').value = (shiftSummary(sh).expected / 100).toFixed(2);
+      inputs['count-cash']($('#countedCash'));
+    },
+    'printer': function () { openPrinterModal(); },
+    'printer-connect': function (el) { connectPrinter(el.dataset.kind); },
+    'printer-disconnect': function () { disconnectPrinter(); },
+    'printer-test': function () { doPrint(testBytes, true); },
     'view-order': function (el) { showReceipt(el.dataset.id, false); },
     'void-order': function (el) { voidOrder(el.dataset.id); },
     'export-csv': function () { exportCsv(); },
@@ -970,7 +1695,23 @@
     'orders-date': function (el) { if (el.value) { ui.ordersDate = el.value; renderOrdersList(); } },
     'rep-from': function (el) { if (el.value) { ui.repFrom = el.value; renderReport(); } },
     'rep-to': function (el) { if (el.value) { ui.repTo = el.value; renderReport(); } },
-    'import-file': function (el) { importBackup(el.files && el.files[0]); el.value = ''; }
+    'import-file': function (el) { importBackup(el.files && el.files[0]); el.value = ''; },
+    'count-cash': function (el) {
+      var sh = currentShift();
+      if (!sh) return;
+      var c = toCents(el.value);
+      var out = $('#diffOut'), lab = $('#diffLabel');
+      if (!isFinite(c) || c < 0) { out.textContent = '—'; out.className = ''; lab.textContent = 'Difference'; return; }
+      var diff = c - shiftSummary(sh).expected;
+      lab.textContent = diff === 0 ? 'Difference' : (diff > 0 ? 'Over' : 'Short');
+      out.textContent = fmt(Math.abs(diff));
+      out.className = diff === 0 ? 'pos' : 'neg';
+    },
+    'paper-width': function (el) {
+      var w = Number(el.value);
+      if ([32, 42, 48].indexOf(w) >= 0) { state.settings.paperWidth = w; save(); }
+    },
+    'auto-print': function (el) { state.settings.autoPrint = !!el.checked; save(); }
   };
 
   var forms = {
@@ -991,6 +1732,63 @@
       m.name = r.name; m.category = r.category; m.price = r.price; m.available = fd.get('itemAvailable') !== null;
       save(); closeModal(); renderMenuList(); toast('Saved');
     },
+    'shift-open': function (f) {
+      var fd = new FormData(f);
+      if (currentShift()) { closeModal(); render(); return; }
+      var name = String(fd.get('cashier') || '').trim().slice(0, 30);
+      var cash = toCents(fd.get('startCash'));
+      if (!name) { toast('Enter the cashier name'); return; }
+      if (!isFinite(cash) || cash < 0) { toast('Enter the starting cash (0 or more)'); return; }
+      if (cash > MAX_PRICE * 10) { toast('Starting cash is too large'); return; }
+      var sh = {
+        id: uid('s'), no: state.nextShiftNo, openedBy: name, openedAt: new Date().toISOString(),
+        startingCash: cash, closedAt: null, closedBy: '', countedCash: null, difference: null,
+        movements: [], summary: null
+      };
+      state.nextShiftNo++;
+      state.shifts.unshift(sh);
+      state.currentShiftId = sh.id;
+      state.settings.lastCashier = name;
+      state.settings.lastStartCash = cash;
+      save(); closeModal(); render();
+      toast('Shift #' + sh.no + ' opened');
+    },
+    'shift-cash': function (f) {
+      var sh = currentShift();
+      if (!sh) { closeModal(); render(); return; }
+      var fd = new FormData(f);
+      var type = fd.get('type') === 'out' ? 'out' : 'in';
+      var amt = toCents(fd.get('amount'));
+      if (!isFinite(amt) || amt <= 0) { toast('Enter an amount greater than zero'); return; }
+      if (type === 'out' && amt > shiftSummary(sh).expected) { toast('Not enough cash in the drawer for that'); return; }
+      sh.movements.push({ id: uid('m'), type: type, amount: amt, note: String(fd.get('note') || '').trim().slice(0, 40), ts: new Date().toISOString() });
+      save(); closeModal(); render();
+      toast((type === 'in' ? 'Paid in ' : 'Paid out ') + fmt(amt));
+    },
+    'shift-close': function (f) {
+      var sh = currentShift();
+      if (!sh) { closeModal(); render(); return; }
+      var fd = new FormData(f);
+      var counted = toCents(fd.get('counted'));
+      if (!isFinite(counted) || counted < 0) { toast('Enter the cash you counted'); return; }
+      var sum = shiftSummary(sh);
+      var diff = counted - sum.expected;
+      if (diff !== 0 && !window.confirm('Counted cash is ' + fmt(Math.abs(diff)) + (diff > 0 ? ' over' : ' short') + '. Close the shift anyway?')) return;
+      sh.summary = sum;
+      sh.countedCash = counted;
+      sh.difference = diff;
+      sh.closedAt = new Date().toISOString();
+      sh.closedBy = sh.openedBy;
+      state.currentShiftId = null;
+      save();
+      closeModal();
+      render();
+      showShiftReport(sh.id, true);
+      if (state.settings.autoPrint && printerReady()) {
+        rawPrint(shiftReportBytes(sh)).catch(function (e) { toast('Auto-print failed: ' + errText(e)); });
+      }
+      toast('Shift #' + sh.no + ' closed');
+    },
     'settings': function (f) {
       var fd = new FormData(f);
       var shop = String(fd.get('shopName') || '').trim().slice(0, 40);
@@ -999,14 +1797,14 @@
       if (!shop) { toast('Shop name is required'); return; }
       if (!cur) { toast('Currency symbol is required'); return; }
       if (!isFinite(rate) || rate < 0 || rate > 100) { toast('Tax rate must be between 0 and 100'); return; }
-      state.settings = {
+      Object.assign(state.settings, {
         shopName: shop, currency: cur, taxRate: rate,
         taxInclusive: fd.get('taxInclusive') !== null,
         phone: String(fd.get('phone') || '').trim().slice(0, 30),
         email: String(fd.get('email') || '').trim().slice(0, 60),
         address: String(fd.get('address') || '').trim().slice(0, 100),
         footer: String(fd.get('footer') || '').trim().slice(0, 80)
-      };
+      });
       save(); renderShell(); toast('Settings saved');
     }
   };
@@ -1042,9 +1840,9 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && modalOpen()) { closeModal(); return; }
-    if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches && e.target.matches('tr[data-action="view-order"]')) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches && e.target.matches('tr[data-action="view-order"], tr[data-action="view-shift"]')) {
       e.preventDefault();
-      showReceipt(e.target.dataset.id, false);
+      actions[e.target.dataset.action](e.target);
     }
   });
 
@@ -1060,7 +1858,10 @@
   render();
   tickClock();
   setInterval(tickClock, 30000);
+  setInterval(checkPrinter, 5000);
+  watchPrinterEvents();
+  autoReconnect();
 
   // test hook (harmless in production)
-  window.__cafepos = { calc: calc, state: function () { return state; } };
+  window.__cafepos = { calc: calc, state: function () { return state; }, shiftSummary: shiftSummary, receiptBytes: receiptBytes, shiftReportBytes: shiftReportBytes };
 })();

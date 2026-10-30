@@ -226,7 +226,36 @@ tr.clickable:hover td { background: var(--soft); }
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+
+/* ---------- status pills, shift, printer ---------- */
+.status { display: flex; gap: 6px; align-items: center; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 999px;
+  padding: 6px 12px; background: rgba(255, 255, 255, .12); color: #fff;
+  font-size: .85rem; font-weight: 600; white-space: nowrap;
+}
+.pill:hover { background: rgba(255, 255, 255, .22); }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #9a8f86; flex: none; }
+.dot.ok { background: #4cc37f; }
+.dot.warn { background: #f0b24a; }
+.dot.bad { background: #ff6b5e; }
+
+.shift-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.badge.open { background: var(--ok); color: #fff; vertical-align: middle; }
+.sec { color: var(--ok); font-size: 1rem; margin-bottom: 4px; }
+.sec.sp { margin-top: 16px; }
+.kv { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.kv:last-child { border-bottom: 0; }
+.kv.strong { font-weight: 800; }
+.kv span:last-child { white-space: nowrap; }
+.pbox { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--soft); border-radius: 10px; }
+.pbox .dot { width: 12px; height: 12px; }
+#diffOut.pos, #diffOut.neg { font-weight: 800; }
+
 /* ---------- responsive ---------- */
+@media (max-width: 1280px) {
+  .clock { display: none; }
+}
 @media (max-width: 900px) {
   .register { grid-template-columns: 1fr; }
   .cart { position: static; max-height: none; grid-template-rows: auto; margin-bottom: 72px; }
@@ -234,11 +263,15 @@ tr.clickable:hover td { background: var(--soft); }
   .mobile-bar { display: flex; }
   .clock { display: none; }
   .topbar { flex-wrap: wrap; gap: 6px 12px; padding-bottom: 6px; }
-  .brand { max-width: 100%; }
+  .brand { max-width: none; flex: 1 1 0; min-width: 0; }
   .tabs { order: 3; flex-basis: 100%; }
 }
 @media (max-width: 520px) {
   main { padding: 10px; }
+  .topbar { gap: 6px 8px; }
+  .status { gap: 4px; }
+  .pill { padding: 5px 8px; gap: 5px; font-size: .75rem; }
+  .brand { font-size: 1rem; }
   .tabs button { padding: 8px 9px; font-size: .92rem; }
   .grid { grid-template-columns: repeat(2, 1fr); }
   .discount { grid-template-columns: 1fr 1fr; }

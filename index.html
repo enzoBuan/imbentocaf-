@@ -16,10 +16,15 @@
       <nav id="nav" class="tabs" aria-label="Main">
         <button type="button" data-action="tab" data-tab="register">Register</button>
         <button type="button" data-action="tab" data-tab="orders">Orders</button>
+        <button type="button" data-action="tab" data-tab="shift">Shift</button>
         <button type="button" data-action="tab" data-tab="reports">Reports</button>
         <button type="button" data-action="tab" data-tab="menu">Menu</button>
         <button type="button" data-action="tab" data-tab="settings">Settings</button>
       </nav>
+      <div class="status">
+        <button type="button" id="shiftPill" class="pill" data-action="tab" data-tab="shift" aria-label="Shift status"></button>
+        <button type="button" id="printerPill" class="pill" data-action="printer" aria-label="Printer status"></button>
+      </div>
       <div class="clock" id="clock" aria-hidden="true"></div>
     </header>
     <main id="view"></main>
