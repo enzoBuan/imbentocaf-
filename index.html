@@ -2,17 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Imbento Café</title>
   <meta name="description" content="Point-of-sale for Imbento Café: register, orders, reports and menu management.">
   <meta name="theme-color" content="#2b2623">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="app">
     <header class="topbar">
-      <div class="brand"><img class="logo" src="logo-white.png" alt="" width="28" height="41"><span id="shopName">Imbento Café</span></div>
+      <div class="brand"><img class="logo" src="logo-white.png" alt="" width="25" height="36"><span id="shopName">Imbento Café</span></div>
       <nav id="nav" class="tabs" aria-label="Main">
         <button type="button" data-action="tab" data-tab="register">Register</button>
         <button type="button" data-action="tab" data-tab="orders">Orders</button>

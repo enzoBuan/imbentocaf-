@@ -14,18 +14,21 @@
   var DEFAULT_SETTINGS = {
     shopName: 'Imbento Café',
     currency: '₱',
-    taxRate: 12,
+    taxRate: 0,          // the café's printed receipt shows no tax line; set a rate in Settings if needed
     taxInclusive: true,
     phone: '09979839936',
     email: 'imbentocafe@gmail.com',
-    address: 'Suclayin Purok 6, Arayat, Pampanga',
-    footer: 'Thank you! Brew. Create. Inspire.',
+    address: 'Suclayin Purok 6, Arayat Pampanga',
+    posNo: '1',          // printed as "POS: n" on the receipt
+    footer: 'Thank you for your purchase!',
     paperWidth: 32,      // printer characters per line: 32 (58 mm), 42 (76 mm), 48 (80 mm)
     autoPrint: false,    // send receipts to a connected printer right after each sale
     lastCashier: '',
     lastStartCash: 0     // centavos, pre-fills the next "Open shift"
   };
   var PRINTER_KEY = 'cafepos.printer';
+  var OLD_FOOTER = 'Thank you! Brew. Create. Inspire.';
+  var ORDER_TYPES = { dine: 'Dine in', take: 'Take out' };
 
   // Imbento Café menu. Coffee has separate Hot and Iced (16 oz) prices.
   var COFFEE = [
@@ -38,7 +41,7 @@
       ['Biscoff with White Chocolate', 170], ['Biscoff with Pistachio', 175], ['Matcha Latte', 150],
       ['Matcha Ube Latte', 155], ['Matcha Strawberry', 155], ['Ube Strawberry', 145],
       ['Cookies and Cream', 145], ['Strawberry Milk', 80], ['Blueberry Milk', 80],
-      ['Lemon Iced Tea', 75], ['Moringa Citrus / Calamansi', 75], ['Hot Choco', 65]
+      ['Lemon Iced Tea', 75], ['Moringa Citrus/Calamansi', 75], ['Hot Choco', 65]
     ]],
     ['Hot Tea', [
       ['Green Tea Jasmine', 60], ['Black Tea Forest Fruit', 60], ['Peppermint Herbal Tea', 60],
@@ -103,6 +106,9 @@
     return sign + state.settings.currency + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // whole-peso amounts drop the ".00" (used on the compact quick-cash buttons)
+  function fmtWhole(c) { return c % 100 === 0 ? fmt(c).replace(/\.00$/, '') : fmt(c); }
+
   function fmtDateTime(ts) {
     var d = new Date(ts);
     return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) + ' ' +
@@ -126,6 +132,7 @@
       settings: Object.assign({}, DEFAULT_SETTINGS),
       cart: [],
       discount: { type: 'pct', value: 0 },
+      orderType: 'dine',
       nextNo: 1,
       shifts: [],
       currentShiftId: null,
@@ -173,6 +180,9 @@
       shiftId: typeof o.shiftId === 'string' ? o.shiftId : '',
       voidShiftId: typeof o.voidShiftId === 'string' ? o.voidShiftId : '',
       voidedAt: typeof o.voidedAt === 'string' ? o.voidedAt : '',
+      type: ORDER_TYPES[o.type] ? o.type : '',
+      cashier: typeof o.cashier === 'string' ? o.cashier.slice(0, 30) : '',
+      pos: typeof o.pos === 'string' ? o.pos.slice(0, 8) : '',
       shop: typeof o.shop === 'string' ? o.shop : '',
       phone: typeof o.phone === 'string' ? o.phone : '',
       email: typeof o.email === 'string' ? o.email : '',
@@ -233,6 +243,8 @@
     st.taxRate = Math.min(Math.max(num(st.taxRate, 0), 0), 100);
     st.taxInclusive = st.taxInclusive !== false;
     st.footer = String(st.footer == null ? '' : st.footer).slice(0, 80);
+    if (st.footer === OLD_FOOTER) st.footer = f.settings.footer; // move to the footer used on the café's receipt
+    st.posNo = String(st.posNo == null ? f.settings.posNo : st.posNo).slice(0, 8);
     st.phone = String(st.phone == null ? '' : st.phone).slice(0, 30);
     st.email = String(st.email == null ? '' : st.email).slice(0, 60);
     st.address = String(st.address == null ? '' : st.address).slice(0, 100);
@@ -264,6 +276,7 @@
     return {
       menu: menu, orders: orders, settings: st, cart: cart,
       discount: { type: dtype, value: dval },
+      orderType: s.orderType === 'take' ? 'take' : 'dine',
       nextNo: Math.max(nextNo, maxNo + 1),
       shifts: shifts,
       currentShiftId: curId,
@@ -337,8 +350,8 @@
     toastTimer = setTimeout(function () { t.classList.remove('show'); }, 2600);
   }
 
-  function openModal(inner) {
-    $('#modal').innerHTML = '<div class="backdrop" data-action="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">' + inner + '</div></div>';
+  function openModal(inner, cls) {
+    $('#modal').innerHTML = '<div class="backdrop" data-action="modal-backdrop"><div class="modal' + (cls ? ' ' + cls : '') + '" role="dialog" aria-modal="true">' + inner + '</div></div>';
     var first = $('#modal input:not([type=hidden]), #modal button');
     if (first) first.focus();
   }
@@ -391,7 +404,8 @@
   function setTab(tab) {
     ui.tab = tab;
     render();
-    window.scrollTo(0, 0);
+    var m = $('main');
+    if (m) m.scrollTop = 0;
   }
 
   function tickClock() {
@@ -412,13 +426,18 @@
       '<section class="register">' +
         '<div class="catalog">' +
           '<div class="toolbar">' +
-            '<input id="search" type="search" placeholder="Search menu…" aria-label="Search menu" data-input="search" autocomplete="off">' +
-            '<div id="chips" class="chips"></div>' +
+            '<input id="search" type="search" placeholder="Search menu…" aria-label="Search menu" data-input="search" autocomplete="off" enterkeyhint="search">' +
+            '<div id="chips" class="chips" role="tablist" aria-label="Categories"></div>' +
           '</div>' +
           '<div id="grid" class="grid"></div>' +
         '</div>' +
         '<aside class="cart card" id="cart" aria-label="Current order">' +
-          '<div class="cart-head"><h2>Current order</h2><button type="button" class="link" data-action="clear-cart">Clear</button></div>' +
+          '<div class="cart-head"><h2>Current order</h2><button type="button" id="clearBtn" class="btn sm ghost" data-action="clear-cart">Clear</button></div>' +
+          '<div id="orderType" class="seg two" role="group" aria-label="Order type">' +
+            Object.keys(ORDER_TYPES).map(function (k) {
+              return '<button type="button" data-action="order-type" data-type="' + k + '">' + ORDER_TYPES[k] + '</button>';
+            }).join('') +
+          '</div>' +
           '<div id="cartLines" class="lines"></div>' +
           '<div class="discount">' +
             '<label for="discVal">Discount</label>' +
@@ -440,14 +459,27 @@
     renderChips();
     renderGrid();
     renderCart();
+    renderOrderType();
+  }
+
+  function renderOrderType() {
+    var btns = document.querySelectorAll('#orderType button');
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].dataset.type === state.orderType;
+      btns[i].classList.toggle('active', on);
+      btns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
   }
 
   function renderChips() {
     var cats = ['All'].concat(categories());
     if (cats.indexOf(ui.cat) === -1) ui.cat = 'All';
-    $('#chips').innerHTML = cats.map(function (c) {
-      return '<button type="button" class="chip' + (c === ui.cat ? ' active' : '') + '" data-action="cat" data-cat="' + esc(c) + '">' + esc(c) + '</button>';
+    var box = $('#chips');
+    box.innerHTML = cats.map(function (c) {
+      return '<button type="button" role="tab" aria-selected="' + (c === ui.cat) + '" class="chip' + (c === ui.cat ? ' active' : '') + '" data-action="cat" data-cat="' + esc(c) + '">' + esc(c) + '</button>';
     }).join('');
+    var act = box.querySelector('.chip.active');
+    if (act && act.scrollIntoView) act.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   function renderGrid() {
@@ -465,14 +497,19 @@
       $('#grid').innerHTML = '<div class="empty card">No items match.</div>';
       return;
     }
-    $('#grid').innerHTML = items.map(function (m) {
+    var grid = $('#grid');
+    var keep = grid.scrollTop; // a re-render must not jump the list while the cashier is tapping items
+    var showCat = ui.cat === 'All' || !!q;
+    grid.innerHTML = items.map(function (m) {
       var inCart = qtyById[m.id];
-      return '<button type="button" class="product' + (m.available ? '' : ' soldout') + '" data-action="add" data-id="' + esc(m.id) + '"' + (m.available ? '' : ' disabled') + '>' +
-        (inCart ? '<span class="qty-badge">' + inCart + '</span>' : '') +
-        '<span><span class="pname">' + esc(m.name) + '</span><br><span class="pcat">' + esc(m.category) + (m.available ? '' : ' · Sold out') + '</span></span>' +
+      var sub = (showCat ? m.category : '') + (m.available ? '' : (showCat ? ' · ' : '') + 'Sold out');
+      return '<button type="button" class="product' + (m.available ? '' : ' soldout') + (inCart ? ' incart' : '') + '" data-action="add" data-id="' + esc(m.id) + '"' + (m.available ? '' : ' disabled') + '>' +
+        (inCart ? '<span class="qty-badge" aria-label="' + inCart + ' in order">' + inCart + '</span>' : '') +
+        '<span class="ptext"><span class="pname">' + esc(m.name) + '</span>' + (sub ? '<span class="pcat">' + esc(sub) + '</span>' : '') + '</span>' +
         '<span class="pprice">' + fmt(m.price) + '</span>' +
       '</button>';
     }).join('');
+    grid.scrollTop = keep;
   }
 
   function renderCart() {
@@ -486,18 +523,24 @@
     if (!lines.length) {
       box.innerHTML = '<div class="empty">Tap an item to start an order.</div>';
     } else {
+      var trash = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
+      var keepTop = box.scrollTop;
       box.innerHTML = lines.map(function (l) {
+        // at quantity 1 the minus button becomes a bin, so removing an item is one clear tap
+        var minus = l.qty === 1
+          ? '<button type="button" class="rm" data-action="dec" data-id="' + esc(l.id) + '" aria-label="Remove ' + esc(l.name) + '">' + trash + '</button>'
+          : '<button type="button" data-action="dec" data-id="' + esc(l.id) + '" aria-label="Decrease quantity of ' + esc(l.name) + '">−</button>';
         return '<div class="line">' +
-          '<div><div class="lname">' + esc(l.name) + '</div><div class="lsub">' + fmt(l.price) + ' each</div></div>' +
+          '<div class="lname">' + esc(l.name) + '</div>' +
           '<div class="ltotal">' + fmt(l.price * l.qty) + '</div>' +
-          '<div class="qty">' +
-            '<button type="button" data-action="dec" data-id="' + esc(l.id) + '" aria-label="Decrease quantity of ' + esc(l.name) + '">−</button>' +
+          '<div class="lsub">' + fmt(l.price) + ' each</div>' +
+          '<div class="qty">' + minus +
             '<span>' + l.qty + '</span>' +
             '<button type="button" data-action="inc" data-id="' + esc(l.id) + '" aria-label="Increase quantity of ' + esc(l.name) + '">+</button>' +
           '</div>' +
-          '<div class="right"><button type="button" class="rm" data-action="rm" data-id="' + esc(l.id) + '" aria-label="Remove ' + esc(l.name) + '">✕</button></div>' +
         '</div>';
       }).join('');
+      box.scrollTop = keepTop;
     }
     renderTotals(lines);
     renderGridBadgesOnly();
@@ -558,6 +601,7 @@
   function resetOrderDraft() {
     state.cart = [];
     state.discount = { type: 'pct', value: 0 };
+    state.orderType = 'dine';
   }
 
   /* ------------------------------ payment ------------------------------ */
@@ -567,39 +611,109 @@
     var lines = cartLines();
     if (!lines.length) { toast('Add an item first'); return; }
     var t = calc(lines, state.discount, state.settings);
-    pay = { method: 'cash', tendered: 0, totals: t, lines: lines, disc: { type: state.discount.type, value: state.discount.value } };
-    var quicks = [50, 100, 200, 500, 1000, 2000].filter(function (v) { return v * 100 >= t.total; }).slice(0, 3);
+    pay = { method: 'cash', tendered: 0, entry: '', fresh: false, totals: t, lines: lines, disc: { type: state.discount.type, value: state.discount.value }, type: state.orderType };
+    var keys = ['7', '8', '9', '4', '5', '6', '1', '2', '3', '0', '00', '.'];
     openModal(
       '<h2>Payment</h2>' +
-      '<div class="due"><span>Amount due</span><strong>' + fmt(t.total) + '</strong></div>' +
-      '<div class="seg" id="payMethods">' +
-        Object.keys(METHODS).map(function (k) {
-          return '<button type="button" data-action="pay-method" data-method="' + k + '">' + METHODS[k] + '</button>';
-        }).join('') +
-      '</div>' +
-      '<div id="cashBox" class="stack">' +
-        '<label class="field">Cash received<input id="tendered" type="number" min="0" step="0.01" inputmode="decimal" data-input="tendered" placeholder="0.00"></label>' +
-        '<div class="quick">' +
-          '<button type="button" class="btn sm" data-action="pay-quick" data-cents="' + t.total + '">Exact</button>' +
-          quicks.map(function (v) { return '<button type="button" class="btn sm" data-action="pay-quick" data-cents="' + (v * 100) + '">' + fmt(v * 100) + '</button>'; }).join('') +
+      '<div class="paygrid">' +
+        '<div class="stack">' +
+          '<div class="due"><span>Amount due</span><strong>' + fmt(t.total) + '</strong></div>' +
+          '<div class="seg" id="payMethods">' +
+            Object.keys(METHODS).map(function (k) {
+              return '<button type="button" data-action="pay-method" data-method="' + k + '">' + METHODS[k] + '</button>';
+            }).join('') +
+          '</div>' +
+          '<div id="cashBox" class="stack">' +
+            '<div class="tender"><span class="tlabel">Cash received</span><strong id="tenderOut" class="ph"></strong>' +
+              '<button type="button" class="tback" data-action="pay-key" data-key="back" aria-label="Delete last digit">' +
+                '<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7z"/><path d="M13 9.5l5 5M18 9.5l-5 5"/></svg>' +
+              '</button>' +
+            '</div>' +
+            '<div class="quick" id="quickBox">' +
+              '<button type="button" class="btn" data-action="pay-quick" data-cents="' + t.total + '">Exact</button>' +
+              payQuicks(t.total).map(function (c) { return '<button type="button" class="btn" data-action="pay-quick" data-cents="' + c + '">' + fmtWhole(c) + '</button>'; }).join('') +
+            '</div>' +
+            '<div class="change" id="changeRow"><span id="changeLbl">Change</span><span id="changeOut">' + fmt(0) + '</span></div>' +
+          '</div>' +
+          '<div id="otherBox" class="notice" hidden></div>' +
         '</div>' +
-        '<div class="change"><span>Change</span><span id="changeOut">' + fmt(0) + '</span></div>' +
+        '<div id="keypad" class="keypad" aria-label="Number pad">' +
+          keys.map(function (k) { return '<button type="button" data-action="pay-key" data-key="' + k + '">' + k + '</button>'; }).join('') +
+          '<button type="button" class="kclear" data-action="pay-key" data-key="clear">Clear</button>' +
+        '</div>' +
       '</div>' +
-      '<div class="actions"><button type="button" class="btn" data-action="close-modal">Cancel</button>' +
-      '<button type="button" id="confirmPay" class="btn primary" data-action="pay-confirm">Complete sale</button></div>'
+      '<div class="actions sticky"><button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+      '<button type="button" id="confirmPay" class="btn primary" data-action="pay-confirm">Complete sale</button></div>',
+      'wide'
     );
+    updatePayUI();
+  }
+
+  // "Exact" is always offered; these are the next sensible notes the customer might hand over.
+  function payQuicks(total) {
+    var seen = {}, out = [];
+    [50, 100, 500, 1000].forEach(function (step) {
+      var v = Math.ceil(total / (step * 100)) * step * 100;
+      if (v > total && !seen[v]) { seen[v] = true; out.push(v); }
+    });
+    return out.sort(function (a, b) { return a - b; }).slice(0, 4);
+  }
+
+  function entryText(e) {
+    var parts = e.split('.');
+    var whole = parts[0] === '' ? '0' : Number(parts[0]).toLocaleString('en-US');
+    return state.settings.currency + whole + (parts.length > 1 ? '.' + parts[1] : '');
+  }
+
+  function payKey(k) {
+    if (!pay || pay.method !== 'cash') return;
+    var e = pay.entry;
+    if (k === 'back') { e = e.slice(0, -1); pay.fresh = false; }
+    else if (k === 'clear') { e = ''; pay.fresh = false; }
+    else {
+      if (pay.fresh) { e = ''; pay.fresh = false; } // first key after a quick amount starts over
+      k.split('').forEach(function (ch) {
+        var dot = e.indexOf('.');
+        if (ch === '.') { if (dot === -1) e = (e || '0') + '.'; return; }
+        if (dot >= 0) { if (e.length - dot - 1 < 2) e += ch; return; }
+        if (e.length >= 8) return;
+        e = e === '0' ? ch : e + ch;
+      });
+    }
+    pay.entry = e;
+    var c = toCents(e);
+    pay.tendered = isFinite(c) && c > 0 ? c : 0;
     updatePayUI();
   }
 
   function updatePayUI() {
     if (!pay) return;
     var btns = document.querySelectorAll('#payMethods button');
-    for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('active', btns[i].dataset.method === pay.method);
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].dataset.method === pay.method;
+      btns[i].classList.toggle('active', on);
+      btns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
     var isCash = pay.method === 'cash';
     $('#cashBox').hidden = !isCash;
+    $('#keypad').hidden = !isCash;
+    var other = $('#otherBox');
+    other.hidden = isCash;
+    other.textContent = 'Collect ' + fmt(pay.totals.total) + ' by ' + METHODS[pay.method] + ', then tap Complete sale.';
+    var out = $('#tenderOut');
+    out.textContent = pay.entry ? entryText(pay.entry) : fmt(0);
+    out.classList.toggle('ph', !pay.entry);
     var change = Math.max(pay.tendered - pay.totals.total, 0);
-    $('#changeOut').textContent = fmt(change);
-    $('#confirmPay').disabled = isCash && pay.tendered < pay.totals.total;
+    var short = isCash && pay.tendered < pay.totals.total;
+    var owing = short && pay.tendered > 0; // typed something, but not enough yet: show what is still missing
+    $('#changeLbl').textContent = owing ? 'Still needed' : 'Change';
+    $('#changeOut').textContent = owing ? fmt(pay.totals.total - pay.tendered) : fmt(change);
+    $('#changeRow').classList.toggle('short', owing);
+    $('#confirmPay').disabled = short;
+    var quicksEls = document.querySelectorAll('#quickBox button');
+    for (var q = 0; q < quicksEls.length; q++) {
+      quicksEls[q].classList.toggle('active', isCash && pay.tendered > 0 && Number(quicksEls[q].dataset.cents) === pay.tendered);
+    }
   }
 
   function completeSale() {
@@ -629,6 +743,9 @@
       shiftId: sh.id,
       voidShiftId: '',
       voidedAt: '',
+      type: pay.type === 'take' ? 'take' : 'dine',
+      cashier: sh.openedBy,
+      pos: st.posNo,
       shop: st.shopName,
       phone: st.phone,
       email: st.email,
@@ -645,8 +762,7 @@
       $('#discType').value = 'pct';
       updateRegister();
     }
-    showReceipt(order.id, true);
-    if (ok) toast('Sale completed');
+    showReceipt(order.id, true); // the receipt on screen is the confirmation
     if (st.autoPrint && printerReady()) {
       rawPrint(receiptBytes(order)).catch(function (e) { toast('Auto-print failed: ' + errText(e)); });
     }
@@ -654,32 +770,56 @@
 
   /* ------------------------------ receipt ------------------------------ */
 
+  var PIN_SVG = '<svg class="r-pin" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>';
+
+  // Lines under the item list that only appear when they apply (discount / tax), then the payment lines.
+  function receiptExtras(o) {
+    var out = [];
+    if (o.discount > 0) {
+      out.push(['Subtotal', fmt(o.subtotal)]);
+      out.push([o.discLabel, '-' + fmt(o.discount)]);
+    }
+    if (o.taxRate > 0) out.push(['Tax ' + o.taxRate + '%' + (o.taxInclusive ? ' (included)' : ''), fmt(o.tax)]);
+    return out;
+  }
+
+  // Layout follows the café's printed receipt: logo, contact, employee / POS, order type, items, total, payment, thanks.
   function receiptHTML(o) {
-    var rows = o.lines.map(function (l) {
-      return '<div class="r"><span>' + l.qty + ' × ' + esc(l.name) + '</span><span>' + fmt(l.price * l.qty) + '</span></div>';
+    var items = o.lines.map(function (l) {
+      return '<div class="r-item">' +
+        '<div class="r-iname">' + esc(l.name) + '</div>' +
+        '<div class="r-iamt">' + fmt(l.price * l.qty) + '</div>' +
+        (l.qty > 1 ? '<div class="r-iqty">' + l.qty + ' x ' + fmt(l.price) + '</div>' : '') +
+      '</div>';
     }).join('');
-    var taxLabel = 'Tax ' + o.taxRate + '%' + (o.taxInclusive ? ' (incl.)' : '');
-    var contact = [];
-    if (o.phone) contact.push('Tel: ' + esc(o.phone));
-    if (o.email) contact.push(esc(o.email));
+    var extras = receiptExtras(o).map(function (r) {
+      return '<div class="r r-sub"><span>' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
+    }).join('');
+    var payRows = o.method === 'cash'
+      ? '<div class="r"><span>Cash</span><span>' + fmt(o.tendered) + '</span></div><div class="r"><span>Change</span><span>' + fmt(o.change) + '</span></div>'
+      : '<div class="r"><span>' + METHODS[o.method] + '</span><span>' + fmt(o.total) + '</span></div>';
     return '<div class="receipt">' +
       '<div class="r-head">' +
-        '<img class="r-logo" src="logo-black.png" alt="' + esc(o.shop || state.settings.shopName) + ' logo">' +
-        (o.address ? '<div>' + esc(o.address) + '</div>' : '') +
-        contact.map(function (c) { return '<div>' + c + '</div>'; }).join('') +
+        '<img class="r-logo" src="logo-black.png" alt="">' +
+        '<div class="r-shop">' + esc(o.shop || state.settings.shopName) + '</div>' +
+        (o.phone ? '<div>Phone No. ' + esc(o.phone) + '</div>' : '') +
+        (o.email ? '<div>Email: ' + esc(o.email) + '</div>' : '') +
+        (o.address ? '<div class="r-addr">' + PIN_SVG + esc(o.address) + '</div>' : '') +
       '</div>' +
-      '<hr>' +
-      '<div class="center">Order ' + orderNo(o.no) + '</div>' +
-      '<div class="center">' + esc(fmtDateTime(o.ts)) + '</div>' +
+      ((o.cashier || o.pos) ? '<div class="r-meta">' +
+        (o.cashier ? '<div>Employee: ' + esc(o.cashier) + '</div>' : '') +
+        (o.pos ? '<div>POS: ' + esc(o.pos) + '</div>' : '') +
+      '</div>' : '') +
       (o.status === 'void' ? '<div class="voidstamp">VOID</div>' : '') +
-      '<hr>' + rows + '<hr>' +
-      '<div class="r"><span>Subtotal</span><span>' + fmt(o.subtotal) + '</span></div>' +
-      (o.discount > 0 ? '<div class="r"><span>' + esc(o.discLabel) + '</span><span>-' + fmt(o.discount) + '</span></div>' : '') +
-      (o.taxRate > 0 ? '<div class="r"><span>' + esc(taxLabel) + '</span><span>' + fmt(o.tax) + '</span></div>' : '') +
-      '<div class="r strong"><span>TOTAL</span><span>' + fmt(o.total) + '</span></div>' +
-      '<div class="r"><span>Paid by</span><span>' + METHODS[o.method] + '</span></div>' +
-      (o.method === 'cash' ? '<div class="r"><span>Cash</span><span>' + fmt(o.tendered) + '</span></div><div class="r"><span>Change</span><span>' + fmt(o.change) + '</span></div>' : '') +
-      (o.footer ? '<hr><div class="center">' + esc(o.footer) + '</div>' : '') +
+      '<hr>' +
+      (o.type ? '<div class="r-type">' + ORDER_TYPES[o.type] + '</div><hr>' : '') +
+      items +
+      '<hr>' +
+      extras +
+      '<div class="r-total"><span>Total</span><span>' + fmt(o.total) + '</span></div>' +
+      payRows +
+      (o.footer ? '<hr><div class="r-foot">' + esc(o.footer) + '</div>' : '') +
+      '<div class="r-ref">Order ' + orderNo(o.no) + ' · ' + esc(fmtDateTime(o.ts)) + '</div>' +
     '</div>';
   }
 
@@ -688,11 +828,12 @@
     if (!o) return;
     openModal(
       receiptHTML(o) +
-      '<div class="actions no-print">' +
+      '<div class="actions sticky no-print">' +
         (o.status === 'paid' && !justPaid ? '<button type="button" class="btn danger" data-action="void-order" data-id="' + esc(o.id) + '">Void order</button>' : '') +
         '<button type="button" class="btn" data-action="print-order" data-id="' + esc(o.id) + '">Print</button>' +
         '<button type="button" class="btn primary" data-action="close-modal">' + (justPaid ? 'New order' : 'Close') + '</button>' +
-      '</div>'
+      '</div>',
+      'receipt-modal'
     );
   }
 
@@ -926,6 +1067,7 @@
           '<div class="form-grid">' +
             '<label class="field">Phone<input type="text" name="phone" maxlength="30" value="' + esc(s.phone) + '"></label>' +
             '<label class="field">Email<input type="text" name="email" maxlength="60" value="' + esc(s.email) + '"></label>' +
+            '<label class="field">POS number (printed on receipt)<input type="text" name="posNo" maxlength="8" inputmode="numeric" value="' + esc(s.posNo) + '"></label>' +
           '</div>' +
           '<label class="field">Address<input type="text" name="address" maxlength="100" value="' + esc(s.address) + '"></label>' +
           '<label class="field">Receipt footer<input type="text" name="footer" maxlength="80" value="' + esc(s.footer) + '"></label>' +
@@ -1474,7 +1616,29 @@
         b.push(10);
         return api;
       },
-      rule: function () { text(new Array(w + 1).join('-')); b.push(10); return api; },
+      // like row(), but the amount sits on the FIRST line of a wrapped name (as on the café's receipt)
+      itemRow: function (l, r) {
+        r = toAscii(r);
+        var space = w - r.length - 1;
+        if (space < 6) { api.line(l); return api.line(r); }
+        var parts = wrap(l, space);
+        var first = parts.shift();
+        text(first + new Array(w - first.length - r.length + 1).join(' ') + r);
+        b.push(10);
+        parts.forEach(function (ln) { text(ln); b.push(10); });
+        return api;
+      },
+      tall: function (on) { b.push(0x1d, 0x21, on ? 0x01 : 0); return api; }, // double height only, keeps the column count
+      blank: function () { b.push(10); return api; },
+      // 1-bit logo bitmap (GS v 0). Silently skipped when the logo could not be prepared.
+      logo: function () {
+        var r = logoRaster;
+        if (!r) return api;
+        b.push(0x1d, 0x76, 0x30, 0, r.bytesPerRow & 255, r.bytesPerRow >> 8, r.height & 255, r.height >> 8);
+        for (var i = 0; i < r.data.length; i++) b.push(r.data[i]);
+        return api;
+      },
+      rule: function () { text(new Array(w + 1).join('.')); b.push(10); return api; },
       feed: function (n) { b.push(0x1b, 0x64, n); return api; },
       cut: function () { b.push(0x1d, 0x56, 0x42, 0x03); return api; },
       bytes: function () { return new Uint8Array(b); }
@@ -1482,24 +1646,65 @@
     return api;
   }
 
+  // Same layout as the on-screen receipt (see receiptHTML).
   function receiptBytes(o) {
     var p = escpos();
-    p.init().align(1).bold(true).size(true).line(o.shop || state.settings.shopName).size(false).bold(false);
+    p.init().align(1).logo().bold(true).line((o.shop || state.settings.shopName).toLowerCase()).bold(false);
+    if (o.phone) p.line('Phone No. ' + o.phone);
+    if (o.email) p.line('Email: ' + o.email);
     if (o.address) p.line(o.address);
-    if (o.phone) p.line('Tel: ' + o.phone);
-    if (o.email) p.line(o.email);
-    p.align(0).rule().align(1).line('Order ' + orderNo(o.no)).line(fmtDateTime(o.ts));
-    if (o.status === 'void') p.bold(true).line('*** VOID ***').bold(false);
-    p.align(0).rule();
-    o.lines.forEach(function (l) { p.row(l.qty + ' x ' + l.name, fmt(l.price * l.qty)); });
-    p.rule().row('Subtotal', fmt(o.subtotal));
-    if (o.discount > 0) p.row(o.discLabel, '-' + fmt(o.discount));
-    if (o.taxRate > 0) p.row('Tax ' + o.taxRate + '%' + (o.taxInclusive ? ' (incl.)' : ''), fmt(o.tax));
-    p.bold(true).row('TOTAL', fmt(o.total)).bold(false);
-    p.row('Paid by', METHODS[o.method]);
+    p.align(0);
+    if (o.cashier || o.pos) {
+      p.blank();
+      if (o.cashier) p.line('Employee: ' + o.cashier);
+      if (o.pos) p.line('POS: ' + o.pos);
+    }
+    if (o.status === 'void') p.align(1).bold(true).line('*** VOID ***').bold(false).align(0);
+    p.rule();
+    if (o.type) p.line(ORDER_TYPES[o.type]).rule();
+    o.lines.forEach(function (l) {
+      p.itemRow(l.name, fmt(l.price * l.qty));
+      if (l.qty > 1) p.line(l.qty + ' x ' + fmt(l.price));
+    });
+    p.rule();
+    receiptExtras(o).forEach(function (r) { p.row(r[0], r[1]); });
+    p.bold(true).tall(true).row('Total', fmt(o.total)).tall(false).bold(false);
     if (o.method === 'cash') { p.row('Cash', fmt(o.tendered)); p.row('Change', fmt(o.change)); }
+    else p.row(METHODS[o.method], fmt(o.total));
     if (o.footer) p.rule().align(1).line(o.footer).align(0);
+    p.align(1).line('Order ' + orderNo(o.no)).line(fmtDateTime(o.ts)).align(0);
     return p.feed(4).cut().bytes();
+  }
+
+  // Prepares the logo as a 1-bit bitmap for the thermal printer. Runs once at start-up.
+  var logoRaster = null;
+  function prepareLogo() {
+    try {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var wpx = 144; // multiple of 8, about 1/3 of a 58 mm roll
+          var hpx = Math.round(img.naturalHeight * wpx / img.naturalWidth);
+          var cv = document.createElement('canvas');
+          cv.width = wpx; cv.height = hpx;
+          var cx = cv.getContext('2d');
+          cx.fillStyle = '#fff';
+          cx.fillRect(0, 0, wpx, hpx);
+          cx.drawImage(img, 0, 0, wpx, hpx);
+          var px = cx.getImageData(0, 0, wpx, hpx).data;
+          var bpr = wpx / 8, data = new Uint8Array(bpr * hpx);
+          for (var y = 0; y < hpx; y++) {
+            for (var x = 0; x < wpx; x++) {
+              var i = (y * wpx + x) * 4;
+              var lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+              if (lum < 140) data[y * bpr + (x >> 3)] |= 0x80 >> (x & 7);
+            }
+          }
+          logoRaster = { bytesPerRow: bpr, height: hpx, data: data };
+        } catch (e) { logoRaster = null; } // e.g. canvas blocked: print without the logo
+      };
+      img.src = 'logo-black.png';
+    } catch (e) { /* print without the logo */ }
   }
 
   function shiftReportBytes(sh) {
@@ -1598,19 +1803,34 @@
       state.cart = state.cart.filter(function (c) { return c.id !== el.dataset.id; });
       save(); updateRegister();
     },
-    'clear-cart': function () {
+    // Clear needs a second tap within 3 s, so a stray touch can't wipe a big order
+    'clear-cart': function (el) {
       if (!state.cart.length && !state.discount.value) return;
+      if (!el.classList.contains('confirm')) {
+        el.classList.add('confirm');
+        el.textContent = 'Tap again to clear';
+        clearTimeout(clearTimer);
+        clearTimer = setTimeout(resetClearBtn, 3000);
+        return;
+      }
+      resetClearBtn();
       resetOrderDraft(); save();
       $('#discVal').value = ''; $('#discType').value = 'pct';
       updateRegister();
     },
+    'order-type': function (el) {
+      state.orderType = el.dataset.type === 'take' ? 'take' : 'dine';
+      save(); renderOrderType();
+    },
+    'pay-key': function (el) { payKey(el.dataset.key); },
     'goto-cart': function () { $('#cart').scrollIntoView({ behavior: 'smooth', block: 'start' }); },
     'charge': function () { openPayment(); },
     'pay-method': function (el) { if (pay) { pay.method = el.dataset.method; updatePayUI(); } },
     'pay-quick': function (el) {
       if (!pay) return;
       pay.tendered = parseInt(el.dataset.cents, 10) || 0;
-      $('#tendered').value = (pay.tendered / 100).toFixed(2);
+      pay.entry = pay.tendered % 100 === 0 ? String(pay.tendered / 100) : (pay.tendered / 100).toFixed(2);
+      pay.fresh = true;
       updatePayUI();
     },
     'pay-confirm': function () { completeSale(); },
@@ -1672,6 +1892,13 @@
     }
   };
 
+  var clearTimer = null;
+  function resetClearBtn() {
+    clearTimeout(clearTimer);
+    var b = $('#clearBtn');
+    if (b) { b.classList.remove('confirm'); b.textContent = 'Clear'; }
+  }
+
   var inputs = {
     'search': function (el) { ui.q = el.value; renderGrid(); },
     'disc-val': function (el) {
@@ -1685,12 +1912,6 @@
       state.discount = { type: el.value === 'amt' ? 'amt' : 'pct', value: 0 };
       $('#discVal').value = '';
       save(); renderTotals();
-    },
-    'tendered': function (el) {
-      if (!pay) return;
-      var c = toCents(el.value);
-      pay.tendered = isFinite(c) && c > 0 ? c : 0;
-      updatePayUI();
     },
     'orders-date': function (el) { if (el.value) { ui.ordersDate = el.value; renderOrdersList(); } },
     'rep-from': function (el) { if (el.value) { ui.repFrom = el.value; renderReport(); } },
@@ -1803,7 +2024,8 @@
         phone: String(fd.get('phone') || '').trim().slice(0, 30),
         email: String(fd.get('email') || '').trim().slice(0, 60),
         address: String(fd.get('address') || '').trim().slice(0, 100),
-        footer: String(fd.get('footer') || '').trim().slice(0, 80)
+        footer: String(fd.get('footer') || '').trim().slice(0, 80),
+        posNo: String(fd.get('posNo') || '').trim().slice(0, 8)
       });
       save(); renderShell(); toast('Settings saved');
     }
@@ -1840,6 +2062,13 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && modalOpen()) { closeModal(); return; }
+    if (pay && pay.method === 'cash' && !(e.ctrlKey || e.metaKey || e.altKey)) {
+      var tag = e.target && e.target.tagName;
+      if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') {
+        if (/^[0-9.]$/.test(e.key)) { e.preventDefault(); payKey(e.key); return; }
+        if (e.key === 'Backspace') { e.preventDefault(); payKey('back'); return; }
+      }
+    }
     if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches && e.target.matches('tr[data-action="view-order"], tr[data-action="view-shift"]')) {
       e.preventDefault();
       actions[e.target.dataset.action](e.target);
@@ -1856,6 +2085,10 @@
   /* ------------------------------ boot ------------------------------ */
 
   render();
+  prepareLogo();
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () { /* works online without it */ }); });
+  }
   tickClock();
   setInterval(tickClock, 30000);
   setInterval(checkPrinter, 5000);
@@ -1863,5 +2096,5 @@
   autoReconnect();
 
   // test hook (harmless in production)
-  window.__cafepos = { calc: calc, state: function () { return state; }, shiftSummary: shiftSummary, receiptBytes: receiptBytes, shiftReportBytes: shiftReportBytes };
+  window.__cafepos = { calc: calc, receiptHTML: receiptHTML, logoReady: function () { return !!logoRaster; }, state: function () { return state; }, shiftSummary: shiftSummary, receiptBytes: receiptBytes, shiftReportBytes: shiftReportBytes };
 })();
